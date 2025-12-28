@@ -1,0 +1,383 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>🦙 라마의 대모험: 오픈 월드 미로</title>
+<style>
+:root { 
+    --bg:#1a1a2e; --wall:#16213e; --player:#4cc9f0; --enemy:#f72585; 
+    --accent:#fee440; --text:#e2e2e2;
+}
+body {
+    margin:0; font-family:'Pretendard', sans-serif; background:var(--bg); 
+    color:var(--text); overflow:hidden; display:flex; flex-direction:column; 
+    align-items:center; touch-action:none;
+}
+#header {padding: 10px; font-weight: 800; background: rgba(0,0,0,0.3); width: 100%; text-align: center; display: flex; justify-content: space-around; align-items: center;}
+canvas {
+    background:#0f3460; border:3px solid #4cc9f0; border-radius:15px; 
+    box-shadow: 0 0 20px rgba(76, 201, 240, 0.3); margin: 5px 0;
+}
+.stat-container {display:flex; gap:10px; margin-bottom:5px;}
+.stat {
+    background:rgba(255,255,255,0.05); padding:6px 12px; border-radius:12px; 
+    font-size:0.85rem; border: 1px solid rgba(255,255,255,0.1);
+}
+#joystickContainer {
+    position: relative; width: 100px; height: 100px; 
+    background: rgba(255,255,255,0.1); border-radius: 50%; 
+    margin: 10px 0; border: 2px solid rgba(76, 201, 240, 0.2);
+}
+#joystickKnob {
+    position: absolute; width: 40px; height: 40px; 
+    background: var(--player); border-radius: 50%; 
+    left: 30px; top: 30px; transition: transform 0.1s ease-out;
+}
+.overlay {
+    position:fixed; inset:0; background:rgba(26, 26, 46, 0.98); 
+    display:flex; flex-direction:column; justify-content:center; 
+    align-items:center; z-index:100; text-align:center; padding:20px;
+}
+.btn {
+    width:220px; padding:15px; margin:8px; border:none; border-radius:15px; 
+    color:white; font-weight:bold; cursor:pointer; font-size:1rem;
+}
+#hitOverlay {
+    position: fixed; inset: 0; background: red; opacity: 0; 
+    pointer-events: none; z-index: 90; transition: opacity 0.2s;
+}
+</style>
+</head>
+<body>
+
+<div id="hitOverlay"></div>
+
+<div id="menuScreen" class="overlay">
+    <h1 style="font-size:2.5rem; margin-bottom:10px; color:var(--player)">🦙 LLAMA ADVENTURE</h1>
+    <p style="margin-bottom:30px; opacity:0.7;">통로가 많아진 미로에서 랄파카를 따돌리세요!</p>
+    <button class="btn" style="background:#4361ee" onclick="startGame()">게임 시작</button>
+</div>
+
+<div id="header">
+    <div>ROUND <span id="roundNum">1</span></div>
+    <div onclick="pauseGame()" style="cursor:pointer">PAUSE ⏸️</div>
+</div>
+
+<div class="stat-container">
+    <div class="stat">🔑 <span id="keys">0</span>/<span id="targetKeys">0</span></div>
+    <div class="stat">❤️ <span id="lives">0</span></div>
+    <div class="stat">⏱️ <span id="gameTimer">0.0</span></div>
+    <div id="activeShield" class="stat" style="display:none; color:#4cc9f0">🛡️ 실드!</div>
+</div>
+
+<canvas id="gameCanvas"></canvas>
+<div id="joystickContainer"><div id="joystickKnob"></div></div>
+
+<div id="pauseScreen" class="overlay" style="display:none; background:rgba(26, 26, 46, 0.85);">
+    <h1 style="color:var(--accent); margin-bottom:20px;">일시정지</h1>
+    <button class="btn" style="background:#4cc9f0; color:#000" onclick="resumeGame()">계속하기</button>
+    <button class="btn" style="background:#f72585" onclick="goToMain()">메인 화면으로</button>
+</div>
+
+<div id="msgScreen" class="overlay" style="display:none;">
+    <h1 id="msgTitle" style="color:var(--accent);">ROUND CLEAR!</h1>
+    <p id="roundAdvice" style="margin:20px;"></p>
+    <button class="btn" style="background:var(--player); color:#000" onclick="nextAction()">다음 라운드</button>
+</div>
+
+<script>
+const canvas = document.getElementById('gameCanvas');
+const ctx = canvas.getContext('2d');
+const knob = document.getElementById('joystickKnob');
+const container = document.getElementById('joystickContainer');
+
+const ROUND_DATA = {
+    1: { gridSize: 13, keys: 4, openRate: 0.2, enemies: 1, boosterCount: 0 },
+    2: { gridSize: 19, keys: 6, openRate: 0.25, enemies: 2, boosterCount: 6 },
+    3: { gridSize: 27, keys: 9, openRate: 0.3, enemies: 3, boosterCount: 12 },
+    4: { gridSize: 19, keys: 8, openRate: 0.25, enemies: 4, boosterCount: 9 },
+    5: { gridSize: 27, keys: 12, openRate: 0.35, enemies: 5, boosterCount: 15 }
+};
+
+let state = {
+    isRunning: false, isPaused: false, round: 1, maze: [], keys: 0, targetKeys: 0, lives: 3,
+    timer: 0, startTime: 0, totalPauseTime: 0, pauseStart: 0, exitOpen: false, exitPos: {x:0, y:0},
+    hasShield: false, isFrozen: false, speedTimer: 0
+};
+
+// 속도 하향 조정 (기존 대비 약 15~20% 느려짐)
+let config = { tileSize: 0, basePlayerSpeed: 1.5, baseEnemySpeed: 0.65 };
+let player = { x: 0, y: 0, radius: 0 };
+let enemies = [];
+let joystick = { active: false, angle: 0, force: 0 };
+
+function startGame() {
+    state.round = 1;
+    state.startTime = Date.now();
+    state.totalPauseTime = 0;
+    document.getElementById('menuScreen').style.display = 'none';
+    initRound();
+    if(!state.isRunning) { state.isRunning = true; gameLoop(); }
+}
+
+function initRound() {
+    const data = ROUND_DATA[state.round];
+    state.targetKeys = data.keys;
+    state.lives = 3;
+    state.keys = 0;
+    state.exitOpen = false;
+    state.hasShield = false;
+    state.isFrozen = false;
+    state.speedTimer = 0;
+
+    let screenSide = Math.min(window.innerWidth * 0.95, window.innerHeight * 0.45);
+    config.tileSize = screenSide / data.gridSize;
+    canvas.width = canvas.height = screenSide;
+    
+    player.radius = config.tileSize * 0.35;
+    player.x = player.y = config.tileSize * 1.5;
+    
+    generateMaze(data.gridSize, data.openRate);
+    placeItems(data.keys, data.boosterCount);
+    resetEnemies(data.enemies);
+    updateUI();
+}
+
+function generateMaze(size, openRate) {
+    state.maze = Array.from({length: size}, () => Array(size).fill(1));
+    function carve(cx, cy) {
+        const dirs = [[0,-1],[0,1],[-1,0],[1,0]].sort(()=>Math.random()-0.5);
+        state.maze[cy][cx] = 0;
+        for(let [dx,dy] of dirs) {
+            let nx=cx+dx*2, ny=cy+dy*2;
+            if(nx>0 && nx<size-1 && ny>0 && ny<size-1 && state.maze[ny][nx]===1) {
+                state.maze[cy+dy][cx+dx]=0; carve(nx,ny);
+            }
+        }
+    }
+    carve(1,1);
+
+    // [중요] 막다른 길 없애기: 벽을 추가로 많이 허물어 통로 확보
+    for(let y=1; y<size-1; y++) {
+        for(let x=1; x<size-1; x++) {
+            if(state.maze[y][x] === 1 && Math.random() < openRate) {
+                state.maze[y][x] = 0;
+            }
+        }
+    }
+    state.exitPos = {x:size-2, y:size-2};
+    state.maze[size-2][size-2] = 0;
+}
+
+function placeItems(kCount, bCount) {
+    let placed = 0;
+    while(placed < kCount) {
+        let rx=Math.floor(Math.random()*(state.maze.length-2))+1, ry=Math.floor(Math.random()*(state.maze.length-2))+1;
+        if(state.maze[ry][rx]===0 && dist(rx*config.tileSize, ry*config.tileSize, player.x, player.y)>100) {
+            state.maze[ry][rx]=2; placed++;
+        }
+    }
+    placed = 0;
+    while(placed < bCount) {
+        let rx=Math.floor(Math.random()*(state.maze.length-2))+1, ry=Math.floor(Math.random()*(state.maze.length-2))+1;
+        if(state.maze[ry][rx]===0) {
+            state.maze[ry][rx] = Math.floor(Math.random()*4)+3;
+            placed++;
+        }
+    }
+}
+
+function resetEnemies(count) {
+    enemies = [];
+    const size = state.maze.length;
+    for(let i=0; i<count; i++) {
+        enemies.push({ 
+            x:(size-2)*config.tileSize, 
+            y:(size-2)*config.tileSize, 
+            path:[], lastUpdate:0 
+        });
+    }
+}
+
+function gameLoop() {
+    if(!state.isRunning) return;
+    if(!state.isPaused) {
+        update();
+        draw();
+    }
+    requestAnimationFrame(gameLoop);
+}
+
+function update() {
+    let currentSpeed = config.basePlayerSpeed * (state.speedTimer > 0 ? 1.5 : 1.0);
+    if(joystick.active && joystick.force > 0.1) {
+        let vx = Math.cos(joystick.angle)*currentSpeed*joystick.force;
+        let vy = Math.sin(joystick.angle)*currentSpeed*joystick.force;
+        if(canMoveTo(player.x+vx, player.y)) player.x+=vx;
+        if(canMoveTo(player.x, player.y+vy)) player.y+=vy;
+    }
+
+    let gx=Math.floor(player.x/config.tileSize), gy=Math.floor(player.y/config.tileSize);
+    let cell = state.maze[gy][gx];
+    if(cell >= 2) {
+        if(cell === 2) { state.keys++; if(state.keys>=state.targetKeys) state.exitOpen=true; }
+        else if(cell === 3) state.speedTimer = 300;
+        else if(cell === 4) state.hasShield = true;
+        else if(cell === 5) { state.isFrozen = true; setTimeout(()=>state.isFrozen=false, 5000); }
+        else if(cell === 6) { 
+            let found = false;
+            while(!found) {
+                let rx=Math.floor(Math.random()*(state.maze.length-2))+1, ry=Math.floor(Math.random()*(state.maze.length-2))+1;
+                if(state.maze[ry][rx]===0) { player.x=(rx+0.5)*config.tileSize; player.y=(ry+0.5)*config.tileSize; found=true; }
+            }
+        }
+        state.maze[gy][gx] = 0;
+    }
+    if(state.speedTimer > 0) state.speedTimer--;
+    if(state.exitOpen && gx===state.exitPos.x && gy===state.exitPos.y) winRound();
+
+    if(!state.isFrozen) {
+        enemies.forEach(en => {
+            if(Date.now()-en.lastUpdate > 400) {
+                en.path = findPath(Math.floor(en.x/config.tileSize), Math.floor(en.y/config.tileSize), gx, gy);
+                en.lastUpdate = Date.now();
+            }
+            if(en.path.length > 0) {
+                let t=en.path[0], tx=(t.x+0.5)*config.tileSize, ty=(t.y+0.5)*config.tileSize;
+                let a=Math.atan2(ty-en.y, tx-en.x);
+                en.x+=Math.cos(a)*config.baseEnemySpeed; en.y+=Math.sin(a)*config.baseEnemySpeed;
+                if(dist(en.x, en.y, tx, ty)<5) en.path.shift();
+            }
+            if(dist(en.x, en.y, player.x, player.y) < player.radius*1.8) hit();
+        });
+    }
+
+    state.timer = ((Date.now()-state.startTime-state.totalPauseTime)/1000).toFixed(1);
+    updateUI();
+}
+
+function hit() {
+    if(state.hasShield) { state.hasShield = false; return; }
+    state.lives--;
+    document.getElementById('hitOverlay').style.opacity = '0.5';
+    setTimeout(()=>document.getElementById('hitOverlay').style.opacity='0', 200);
+    if(state.lives <= 0) { 
+        alert("GAME OVER!"); 
+        goToMain(); 
+    } else { 
+        // 부활 시 플레이어 위치 초기화 및 랄파카 시작 위치로 강제 이동
+        player.x = player.y = config.tileSize * 1.5; 
+        const data = ROUND_DATA[state.round];
+        resetEnemies(data.enemies); 
+    }
+}
+
+function draw() {
+    ctx.clearRect(0,0,canvas.width,canvas.height);
+    for(let y=0; y<state.maze.length; y++) {
+        for(let x=0; x<state.maze.length; x++) {
+            let c = state.maze[y][x];
+            if(c===1) { ctx.fillStyle='#16213e'; ctx.fillRect(x*config.tileSize, y*config.tileSize, config.tileSize, config.tileSize); }
+            else if(c===2) drawEmoji("🔑", x, y);
+            else if(c===3) drawEmoji("⚡", x, y);
+            else if(c===4) drawEmoji("🛡️", x, y);
+            else if(c===5) drawEmoji("⏱️", x, y);
+            else if(c===6) drawEmoji("🌀", x, y);
+        }
+    }
+    if(state.exitOpen) drawEmoji("🏁", state.exitPos.x, state.exitPos.y);
+    if(state.hasShield) {
+        ctx.beginPath(); ctx.arc(player.x, player.y, player.radius*1.5, 0, Math.PI*2);
+        ctx.strokeStyle='#4cc9f0'; ctx.lineWidth=2; ctx.stroke();
+    }
+    ctx.font = `${config.tileSize}px Arial`;
+    ctx.fillText("🦙", player.x-config.tileSize/2, player.y+config.tileSize/3);
+    enemies.forEach(en => ctx.fillText(state.isFrozen?"🧊":"🐺", en.x-config.tileSize/2, en.y+config.tileSize/3));
+}
+
+function drawEmoji(emoji, x, y) {
+    ctx.font = `${config.tileSize*0.7}px Arial`;
+    ctx.fillText(emoji, x*config.tileSize + 2, (y+0.8)*config.tileSize);
+}
+
+function winRound() {
+    state.isPaused = true;
+    document.getElementById('msgScreen').style.display = 'flex';
+    if(state.round >= 5) {
+        document.getElementById('msgTitle').innerText = "🎉 축하합니다!";
+        document.getElementById('roundAdvice').innerText = `전체 라운드 클리어! 기록: ${state.timer}초`;
+        document.getElementById('nextBtn').innerText = "메인으로";
+        document.getElementById('nextBtn').onclick = goToMain;
+    } else {
+        document.getElementById('roundAdvice').innerText = `Round ${state.round} 완료! 다음 라운드 준비!`;
+    }
+}
+
+function nextAction() {
+    state.round++;
+    document.getElementById('msgScreen').style.display = 'none';
+    state.isPaused = false;
+    initRound();
+}
+
+function goToMain() {
+    state.isRunning = false;
+    document.getElementById('menuScreen').style.display = 'flex';
+    document.getElementById('msgScreen').style.display = 'none';
+    document.getElementById('pauseScreen').style.display = 'none';
+}
+
+function updateUI() {
+    document.getElementById('keys').innerText = state.keys;
+    document.getElementById('targetKeys').innerText = state.targetKeys;
+    document.getElementById('lives').innerText = state.lives;
+    document.getElementById('gameTimer').innerText = state.timer;
+    document.getElementById('roundNum').innerText = state.round;
+    document.getElementById('activeShield').style.display = state.hasShield ? "block" : "none";
+}
+
+function canMoveTo(nx, ny) {
+    const b = player.radius * 0.6;
+    const pts = [{x:nx-b, y:ny-b}, {x:nx+b, y:ny-b}, {x:nx-b, y:ny+b}, {x:nx+b, y:ny+b}];
+    return pts.every(p => {
+        let gx=Math.floor(p.x/config.tileSize), gy=Math.floor(p.y/config.tileSize);
+        return state.maze[gy] && state.maze[gy][gx]!==1;
+    });
+}
+
+function findPath(sx, sy, tx, ty) {
+    let q = [[{x:sx, y:sy}]], visited = new Set();
+    visited.add(`${sx},${sy}`);
+    while(q.length > 0) {
+        let path = q.shift(), curr = path[path.length-1];
+        if(curr.x === tx && curr.y === ty) return path.slice(1);
+        for(let [dx, dy] of [[0,1],[0,-1],[1,0],[-1,0]]) {
+            let nx=curr.x+dx, ny=curr.y+dy;
+            if(nx>=0 && nx<state.maze.length && ny>=0 && ny<state.maze.length && state.maze[ny][nx]!==1 && !visited.has(`${nx},${ny}`)) {
+                visited.add(`${nx},${ny}`); q.push([...path, {x:nx, y:ny}]);
+            }
+        }
+        if(q.length > 300) break;
+    }
+    return [];
+}
+function dist(x1, y1, x2, y2) { return Math.sqrt((x2-x1)**2 + (y2-y1)**2); }
+function pauseGame() { if(!state.isRunning) return; state.isPaused = true; state.pauseStart = Date.now(); document.getElementById('pauseScreen').style.display = 'flex'; }
+function resumeGame() { state.isPaused = false; state.totalPauseTime += (Date.now()-state.pauseStart); document.getElementById('pauseScreen').style.display = 'none'; }
+
+container.addEventListener('pointerdown', e => { joystick.active = true; moveJoystick(e); });
+window.addEventListener('pointermove', e => { if(joystick.active) moveJoystick(e); });
+window.addEventListener('pointerup', () => { joystick.active = false; joystick.force = 0; knob.style.transform = `translate(0,0)`; });
+function moveJoystick(e) {
+    const rect = container.getBoundingClientRect();
+    const dx = e.clientX - (rect.left + rect.width/2);
+    const dy = e.clientY - (rect.top + rect.height/2);
+    const d = Math.sqrt(dx*dx + dy*dy);
+    joystick.angle = Math.atan2(dy, dx);
+    joystick.force = Math.min(d/40, 1);
+    knob.style.transform = `translate(${Math.cos(joystick.angle)*joystick.force*40}px, ${Math.sin(joystick.angle)*joystick.force*40}px)`;
+}
+</script>
+</body>
+</html>
